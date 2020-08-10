@@ -2,6 +2,7 @@ package telegraph
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -30,18 +31,18 @@ type CreatePageRequest struct {
 // 暂时只有自己用得到的属性
 type Page struct {
 	Path string
-	Url  string
+	URL  string
 }
 
 // 创建Page接口返回的数据
 type ResData struct {
 	OK     bool
 	Result Page
+	Error  string
 }
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	// content.GetNode()
 }
 
 func errorHandler(msg string, err error) {
@@ -69,7 +70,14 @@ func sendPost(url string, data *CreatePageRequest, client *http.Client) (link st
 	err4 := json.Unmarshal(body, &dataStruct)
 	errorHandler("解析Response失败", err4)
 
-	return dataStruct.Result.Url, nil
+	// 上面内容长度没有把握好造成的
+	// 如果为false，十有八九是因为内容过长：CONTENT_TOO_BIG
+	if !dataStruct.OK {
+		// TODO 自定义Error没实现Error()方法，导致抛出这个错误时看不到错误字符串。
+		return "", errors.New(dataStruct.Error)
+	}
+
+	return dataStruct.Result.URL, nil
 }
 
 // CreatePage 保存文章，支持判断文章字符是否超出 64 * 1024 byte/字节，超出的话自动截取并且生成多篇文章，且自动将第二篇文章的链接添加到第一篇文章里。
@@ -92,6 +100,8 @@ func CreatePage(data *CreatePageRequest) (string, error) {
 		pageSlice = append(pageSlice, i)
 	}
 
+	fmt.Println(pageSlice)
+
 	// 然后倒着保存文章，这是为了先获取到后面文章的链接。
 	// 从切片倒数第二个开始遍历
 
@@ -110,7 +120,6 @@ func CreatePage(data *CreatePageRequest) (string, error) {
 		}
 
 		if nextPageLink != "" {
-			fmt.Println("下一页：", nextPageLink)
 			page += fmt.Sprintf("\n\n<a href='%s'>下一页</a>", nextPageLink)
 		}
 
