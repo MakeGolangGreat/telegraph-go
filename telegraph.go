@@ -5,141 +5,183 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"strings"
 
-	"github.com/go-playground/validator/v10"
+	"github.com/fatih/color"
 )
-
-const (
-	createPageURL string = "https://api.telegra.ph/createPage"
-)
-
-var validate *validator.Validate
-
-type CreatePageRequest struct {
-	AccessToken   string `json:"access_token"`
-	Title         string `json:"title" validate:"max=10,min=1"`
-	Content       []Node `json:"content"`
-	ReturnContent string `json:"return_content"`
-	Data          string `json:-`
-	AuthorName    string `json:"author_name"`
-	AuthorURL     string `json:"author_url"`
-}
-
-// 暂时只有自己用得到的属性
-type Page struct {
-	Path string
-	URL  string
-}
-
-// 创建Page接口返回的数据
-type ResData struct {
-	OK     bool
-	Result Page
-	Error  string
-}
 
 func init() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	// log.SetFlags(log.LstdFlags | log.Lshortfile)
+	fmt.Println("telegraph.go init...")
 }
 
-func errorHandler(msg string, err error) {
-	if err != nil {
-		log.Fatal("%s - %s", msg, err.Error)
+// 启动Debug模式，才会打印错误
+func (page *Page) logError(msg string, err error) {
+	if page.Debug {
+		color.Red("$s: $s", msg, err.Error())
 	}
 }
 
-func sendPost(url string, data *CreatePageRequest, client *http.Client) (link string, err error) {
-	payload, err := json.Marshal(data)
-	errorHandler("JSON化失败", err)
+// SendPage 发送文章请求
+func (page *Page) SendPage(url string, client *http.Client) (link string, err error) {
+	payload, err := json.Marshal(page)
+	if err != nil {
+		page.logError("文章数据字符化失败", err)
+		return "", err
+	}
 
-	request, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(payload)))
+	request, newRequestErr := http.NewRequest(http.MethodPost, url, strings.NewReader(string(payload)))
+	if newRequestErr != nil {
+		page.logError("NewRequest 失败", newRequestErr)
+		return "", newRequestErr
+	}
 	request.Header.Set("Content-Type", "application/json")
-	errorHandler("初始化请求失败", err)
 
-	resp, err2 := client.Do(request) // resp 可能为 nil，不能读取 Body。所以不能先defer
-	errorHandler("执行请求失败", err2)
+	resp, doError := client.Do(request)
+	if doError != nil {
+		page.logError("发起请求失败", doError)
+		return "", doError
+	}
 	defer resp.Body.Close()
 
-	body, err3 := ioutil.ReadAll(resp.Body)
-	errorHandler("ioutil.ReadAll 失败", err3)
+	body, readError := ioutil.ReadAll(resp.Body)
+	if readError != nil {
+		page.logError("读取resp.body失败", readError)
+		return "", readError
+	}
 
-	var dataStruct ResData
-	err4 := json.Unmarshal(body, &dataStruct)
-	errorHandler("解析Response失败", err4)
+	var pageResponse PageResponse
+	unmarshalError := json.Unmarshal(body, &pageResponse)
+	if unmarshalError != nil {
+		page.logError("反字符化失败", unmarshalError)
+		return "", unmarshalError
+	}
 
-	// 上面内容长度没有把握好造成的
-	// 如果为false，十有八九是因为内容过长：CONTENT_TOO_BIG
-	if !dataStruct.OK {
+	if !pageResponse.OK {
 		// TODO 自定义Error没实现Error()方法，导致抛出这个错误时看不到错误字符串。
-		return "", errors.New(dataStruct.Error)
+		return "", errors.New(pageResponse.Error)
 	}
 
-	return dataStruct.Result.URL, nil
+	return pageResponse.Result.URL, nil
 }
 
-// CreatePage 保存文章，支持判断文章字符是否超出 64 * 1024 byte/字节，超出的话自动截取并且生成多篇文章，且自动将第二篇文章的链接添加到第一篇文章里。
-func CreatePage(data *CreatePageRequest) (string, error) {
-	// 接口限制字节长度为64KB，utf-8编码，意味着全是中文字符的话，差不多只能有 21000 个字。
-	// 很奇怪：64 * 1024 / 3 = 21845，但我看Request Content-Length是 66318。多出来的，2318kb是什么数据。猜测是请求的其他部分的内容。懒得查了，大概以21000个字符为上限好了。
-
-	// 但为了保留可能存在的后面内容的telegra.ph链接，预留出部分字节长度。
-	const limit int32 = 21000 //21000
-	// [0 21000 25000]
-	var pageSlice = []int32{0}
-	// 转换位数组，方便获取子字符串
-	contentRune := []rune(data.Data)
-
-	// 根据limit将内容分割成下标的数组
-	fmt.Println("文章的长度是: ", int32(len(contentRune)))
-
-	for i := int32(0); i < int32(len(contentRune)); {
-		i += limit
-		pageSlice = append(pageSlice, i)
-	}
-
-	fmt.Println(pageSlice)
-
-	// 然后倒着保存文章，这是为了先获取到后面文章的链接。
-	// 从切片倒数第二个开始遍历
-
-	// 存储下一篇文章的链接。
-	var nextPageLink string
-
-	for i := len(pageSlice) - 2; i >= 0; i-- {
-		// 截取的文章字符串
-		var page string
-		// 获取到对应下标范围内的文章字符串。
-		if i == len(pageSlice)-2 {
-			// 获取到对应下标范围内的文章字符串。
-			page = string(contentRune[pageSlice[i]:])
-		} else {
-			page = string(contentRune[pageSlice[i]:pageSlice[i+1]])
-		}
-
-		if nextPageLink != "" {
-			page += fmt.Sprintf("\n\n<a href='%s'>下一页</a>", nextPageLink)
-		}
-
-		content, err := ContentFormat(page)
-		errorHandler("转换文章为[]Node失败", err)
-
-		data.Content = content
-
-		link, err2 := sendPost(createPageURL, data, &http.Client{})
-		errorHandler("保存文章失败", err2)
-		nextPageLink = link
-	}
-
-	return nextPageLink, nil
+// CreatePage 将文本数据保存到Telegrah，并返回一个Telegraph链接。
+// 具体实现和说明请看：CreatePageWithClient
+// 这里只是一层简单的封装，传入一个默认的Client
+func (page *Page) CreatePage() (string, error) {
+	return page.CreatePageWithClient(&http.Client{})
 }
 
-func CreatePageWithClient(data CreatePageRequest, client *http.Client) (string, error) {
-	content, err := ContentFormat(data.Data)
-	errorHandler("转换文章数据失败", err)
-	data.Content = content
+// CreatePageWithClient 将文本数据保存到Telegrah，并返回一个Telegraph链接。
+// 由于Telegraph存在内容大小限制（64kb,utf-8），CreatePageWithClient将会把文本数据分割成多篇文章发表。
+// 但放心，第一篇文章尾部将会存在指向第二篇文章的链接（「下一页」）
+// 提供一个Client参数，方便调用者传入一个自定义的Client（其实就是代理，让程序可以翻墙）
+func (page *Page) CreatePageWithClient(client *http.Client) (string, error) {
+	pageNode, err := contentFormat(page.Data)
+	if err != nil {
+		page.logError("DOM -> Node失败", err)
+		return "", err
+	}
 
-	return sendPost(createPageURL, &data, client)
+	pageStr, marshalError := json.Marshal(pageNode)
+	if marshalError != nil {
+		page.logError("page字符化失败", marshalError)
+		return "", marshalError
+	}
+
+	// 全部文章数据
+	// 这里还没有根据Telegraph能发的最大数据限制来分割数据。
+	var totalArticleNodeArray []Node
+	// 如果数据字节够一篇文章
+	if int32(len(pageStr)) < maxContentLimit {
+		totalArticleNodeArray = append(totalArticleNodeArray, pageNode)
+	} else {
+		// 如果数据字节超过一篇文章，那么需要遍历将文章数据分割成多篇文章。
+		var byteSizeCount int32 // 字节计数
+		var index int           // []Node数据的下标索引
+
+		for i, v := range pageNode {
+			// 判断字节时，必须将[]Node数据转换为字符串。
+			payload, payloadError := json.Marshal(v)
+			if payloadError != nil {
+				page.logError("字符化失败", payloadError)
+				return "", payloadError
+			}
+
+			// 每次遍历，累加遍历过的元素的字节数。
+			byteSizeCount += int32(len(payload))
+
+			// 如果字节大小超过限制，说明算上当前下标对应的数据，已经超过一篇文章的字节大小。
+			// 那么到前一个下标为止的数据量够一篇文章了。
+			if byteSizeCount > maxContentLimit {
+				totalArticleNodeArray = append(totalArticleNodeArray, pageNode[index:i])
+				// 重新设置起点
+				index = i
+				// 重置字节计数器
+				byteSizeCount = 0
+			}
+		}
+
+		// 最后把上个循环最后没有合并进来的尾部元素单独合并进来。
+		// 一定有最后一部分内容等待手动合并。
+		totalArticleNodeArray = append(totalArticleNodeArray, pageNode[index:])
+	}
+
+	// 记录上一个请求返回的链接，也就是「下一页」的链接。
+	var previousArticleLink string
+	// 文章数据。分割后的，一篇Telegraph文章的数据。
+	var articleNodeArray []Node
+	// 倒序发出请求，为了在当前文章中添加「下一页」
+	for i := len(totalArticleNodeArray) - 1; i >= 0; i-- {
+		switch nodeArr := totalArticleNodeArray[i].(type) {
+		case []Node:
+			articleNodeArray = nodeArr
+
+			// 如果存在链接，说明一共不只有一篇文章，且这不是倒序发出的第一篇，需要手动添加上「下一页」
+			if previousArticleLink != "" {
+				articleNodeArray = append(articleNodeArray, NodeElement{
+					Tag: "p",
+					Children: []Node{
+						NodeElement{
+							Tag: "br",
+						},
+						NodeElement{
+							Tag: "a",
+							Attrs: map[string]string{
+								"href": previousArticleLink,
+							},
+							Children: []Node{"下一页"},
+						},
+					},
+				})
+			}
+
+			// 给每篇Telegraph文章的下方都添加上项目的链接。
+			articleNodeArray = append(articleNodeArray, page.AttachInfo)
+		}
+
+		content, contentError := json.Marshal(articleNodeArray)
+		if contentError != nil {
+			page.logError("文章数据字符化失败", contentError)
+			return "", contentError
+		}
+
+		contentStr := string(content)
+		if page.Debug {
+			color.Red("当前文章序号：%d\n，文章字节数：%d", i+1, len(contentStr))
+		}
+
+		page.Content = contentStr
+
+		link, SendPageError := page.SendPage(createPageURL, client)
+		if SendPageError != nil {
+			page.logError("createPage 请求发送失败", SendPageError)
+			return "", SendPageError
+		}
+
+		previousArticleLink = link
+	}
+
+	return previousArticleLink, nil
 }
