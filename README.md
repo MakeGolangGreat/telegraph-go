@@ -1,6 +1,10 @@
 # telegraph-go
 
-> 是一个封装了 [Telegraph API](https://telegra.ph/api) 的`Golang`库
+> 是一个封装了 [Telegraph API](https://telegra.ph/api) 的`Golang`库。
+> 
+> 传入`HTML字符串`和`标题`数据（当然`telegraph-token`是必须的），telegraph-go会将它存储到Telegraph上，并返回一个可访问的链接给你。
+> 
+> 如何获取`telegraph-token`？请看上面 [Telegraph API](https://telegra.ph/api) 文档
 
 ### APIs has achieved
 
